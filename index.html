@@ -67,7 +67,8 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.03em;margin:0;line-height:1.1
 .chev svg{width:16px;height:16px;stroke:currentColor;stroke-width:2;fill:none}
 .chev:active{background:var(--fill-2)}
 .today-btn{margin-left:auto;border:0;background:none;color:#5C4E2E;font-size:16px;font-weight:600;padding:4px 2px;cursor:pointer;letter-spacing:.01em;line-height:1.1}
-.help-btn{margin-left:6px;width:23px;height:23px;border:0;border-radius:50%;background:var(--fill);color:#141316;font-family:inherit;font-size:12.5px;font-weight:700;line-height:1;display:grid;place-items:center;padding:0 0 1px;cursor:pointer}
+.help-btn{margin-left:6px;width:19px;height:19px;border:0;border-radius:50%;background:var(--fill);color:#141316;font-family:inherit;font-size:12px;font-weight:700;line-height:1;display:grid;place-items:center;padding:0;cursor:pointer;position:relative}
+.help-btn::before{content:"";position:absolute;inset:-8px -10px -8px -2px}  /* 圆点小了，向四周扩点按余量（左侧少扩，别抢「今天」的点击） */
 .help-btn:active{background:rgba(20,19,22,.12)}
 
 .weekhead{display:grid;grid-template-columns:repeat(7,1fr);column-gap:2px;margin-top:12px;color:var(--muted);font-size:12px;letter-spacing:.08em;text-align:center}
