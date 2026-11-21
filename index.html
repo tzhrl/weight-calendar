@@ -75,7 +75,8 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.03em;margin:0;line-height:1.1
 
 /* ---------- 日历（撑满剩余高度） ---------- */
 #page-calendar{display:flex;flex-direction:column;min-height:calc(100vh - var(--cal-off))}
-#page-calendar[hidden]{display:none}.calendar{
+#page-calendar[hidden]{display:none}
+.calendar{
   display:grid;grid-template-columns:repeat(7,1fr);column-gap:2px;row-gap:5px;margin-top:8px;
   touch-action:pan-y;grid-auto-rows:minmax(56px,auto);position:relative;
 }
@@ -146,7 +147,6 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.03em;margin:0;line-height:1.1
 .hist-title{font-size:13px;font-weight:600;letter-spacing:.01em}
 .hist-count{font-size:10.5px;color:var(--ink-4)}
 .hist-note{font-size:10.5px;color:var(--ink-3);line-height:1.65;margin:6px 0 0}
-.hist-note + #bk-list{margin-top:12px}
 .mrow{background:var(--card-soft);border-radius:18px;padding:12px 13px 11px;margin-top:9px}
 .mrow-head{display:flex;align-items:center;gap:6px}
 .mrow-date{font-size:11.5px;font-weight:600}
@@ -198,16 +198,9 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.03em;margin:0;line-height:1.1
 .breset-btn{margin-left:auto;flex:0 0 auto;border:0;background:rgba(201,63,39,.1);border-radius:999px;padding:8px 14px;font-family:inherit;font-size:12px;font-weight:600;color:var(--up);cursor:pointer;white-space:nowrap}
 .breset-btn:active{background:rgba(201,63,39,.18)}
 .bbtn:active{background:rgba(20,19,22,.12)}
-.bitem{display:flex;align-items:center;gap:8px;background:var(--card-soft);border-radius:18px;padding:12px 13px 12px 14px;margin-top:9px}
-.bitem-l{min-width:0}
-.bitem-time{font-size:12.5px;font-weight:600;white-space:nowrap}
-.bitem-meta{font-size:10.5px;color:var(--ink-3);margin-top:5px}
-.bitem-acts{margin-left:auto;display:flex;align-items:center;gap:1px;flex:0 0 auto}
-.bitem-acts button{border:0;background:none;font-family:inherit;font-size:10.5px;color:var(--ink-2);padding:7px 6px;cursor:pointer;border-radius:8px}
-.bitem-acts button:active{background:var(--fill-2)}
-.bitem-acts button.del{color:var(--ink-4)}
 .bk-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);margin-left:7px;vertical-align:9px}
 .bk-dot[hidden]{display:none}
+.bk-warn{font-size:10.5px;color:#B4552A;line-height:1.65;margin:4px 0 0}
 .bk-remind{font-size:10.5px;color:#B4552A;line-height:1.65;margin:8px 0 0}
 .bk-remind[hidden]{display:none}
 
@@ -505,15 +498,9 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     </div>
   </div>
 
-  <div class="hist">
-    <div class="hist-head">
-      <span class="hist-title">备份记录</span>
-      <span class="hist-count" id="bk-count"></span>
-    </div>
-    <p class="bk-remind" id="bk-remind" hidden></p>
-    <p class="hist-note">数据仅存于本机浏览器。需点按上方「备份到手机本地」另存副本；否则清除浏览器缓存时，全部记录将一并清除。</p>
-    <div id="bk-list"></div>
-  </div>
+  <p class="hist-note" id="last-saved" hidden></p>
+  <p class="bk-warn">清除浏览器缓存会导致数据全部清空，请手动备份到手机本地。</p>
+  <p class="bk-remind" id="bk-remind" hidden></p>
 </section>
 
 </div>
@@ -650,24 +637,89 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
 
   /* ================= 存储 ================= */
   var store;
-  var BACKUP_LIMIT = 24;
+
+  var DB_NAME = 'weight-calendar-db';
+  var DB_STORE = 'kv';
+  var DB_KEY = 'state';
+  var idb = null;               /* IndexedDB 句柄；为 null 时退回 localStorage */
+  var useIDB = false;
+  var bootDirty = false;        /* 迁移完成前用户已经改过数据，别再拿旧库覆盖 */
+  var writeChain = Promise.resolve();   /* 写入排队，避免并发覆盖 */
+  var failToastAt = 0;
 
   function emptyStore() {
-    return { weights: {}, measures: {}, backups: [], settings: { unit: 'kg' } };
+    return { weights: {}, measures: {}, settings: { unit: 'kg' } };
   }
   function normalizeStore(s) {
     if (!s || typeof s !== 'object' || !s.weights || !s.measures) return emptyStore();
-    s.backups = Array.isArray(s.backups) ? s.backups.filter(function (b) {
-      return b && typeof b === 'object' && b.at;
-    }) : [];
+    /* 早年留在浏览器里的备份副本不再需要，读入时直接丢掉，顺手腾出空间 */
+    delete s.backups;
     s.settings = Object.assign({ unit: 'kg' }, s.settings || {});
     return s;
   }
+
+  function openDB() {
+    return new Promise(function (res, rej) {
+      if (!window.indexedDB) { rej(new Error('no-idb')); return; }
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var d = req.result;
+        if (!d.objectStoreNames.contains(DB_STORE)) d.createObjectStore(DB_STORE);
+      };
+      req.onsuccess = function () { res(req.result); };
+      req.onerror = function () { rej(req.error || new Error('idb-open')); };
+      req.onblocked = function () { rej(new Error('idb-blocked')); };
+    });
+  }
+
+  function dbGet() {
+    return new Promise(function (res, rej) {
+      var tx = idb.transaction(DB_STORE, 'readonly');
+      var r = tx.objectStore(DB_STORE).get(DB_KEY);
+      r.onsuccess = function () { res(r.result ? r.result.v : null); };
+      r.onerror = function () { rej(r.error); };
+    });
+  }
+
+  function dbPut(json) {
+    return new Promise(function (res, rej) {
+      var tx = idb.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).put({ v: json }, DB_KEY);
+      tx.oncomplete = function () { res(true); };
+      tx.onerror = function () { rej(tx.error || new Error('idb-put')); };
+      tx.onabort = function () { rej(tx.error || new Error('idb-abort')); };
+    });
+  }
+
+  /* 写入失败要让用户看见，而不是悄悄丢掉一条记录 */
+  function warnWrite() {
+    var now = Date.now();
+    if (now - failToastAt < 60000) return;
+    failToastAt = now;
+    toast('保存失败：这台浏览器的空间不够，先备份到手机再清理');
+  }
+
+  /* 同步落盘（内存 store 已更新）：写入成功返回 true */
   function persist() {
     idxCache = null;
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch (e) { /* 忽略：file:// 下可能不可用 */ }
+    var json;
+    try { json = JSON.stringify(store); } catch (e) { return Promise.resolve(false); }
+
+    if (useIDB && idb) {
+      var p = writeChain.then(function () { return dbPut(json); });
+      writeChain = p.catch(function () { });
+      return p.then(function () { return true; }, function () { warnWrite(); return false; });
+    }
+
+    bootDirty = true;
+    try {
+      localStorage.setItem(STORE_KEY, json);
+      return Promise.resolve(true);
+    } catch (e) { warnWrite(); return Promise.resolve(false); }
   }
-  function loadStore() {
+
+  /* 首屏先读浏览器 localStorage 里的那份（迁移前的旧位置） */
+  function loadLocal() {
     try {
       var raw = localStorage.getItem(STORE_KEY);
       if (raw) {
@@ -676,6 +728,55 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       }
     } catch (e) { /* 忽略 */ }
     return emptyStore();
+  }
+
+  function dropLocal() {
+    try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 忽略 */ }
+  }
+
+  /* 库里已有数据、但用户在读库完成前刚记了一笔：把新记录并回旧数据里 */
+  function mergeStore(base, extra) {
+    Object.keys(extra.weights).forEach(function (k) { base.weights[k] = extra.weights[k]; });
+    Object.keys(extra.measures).forEach(function (k) {
+      base.measures[k] = Object.assign({}, base.measures[k] || {}, extra.measures[k]);
+    });
+    if (extra.settings.unit && extra.settings.unit !== 'kg') base.settings.unit = extra.settings.unit;
+    if (isNum(extra.settings.height)) base.settings.height = extra.settings.height;
+    if (isNum(extra.settings.goal)) base.settings.goal = extra.settings.goal;
+    if (extra.settings.savedAt) base.settings.savedAt = extra.settings.savedAt;
+    return base;
+  }
+
+  /* 启动后切到 IndexedDB：有数据就用它，没有就把 localStorage 里的迁过去 */
+  function bootStorage() {
+    openDB().then(function (db) {
+      idb = db;
+      useIDB = true;
+      return dbGet().then(function (json) {
+        var s = null;
+        if (json) { try { s = JSON.parse(json); } catch (e) { s = null; } }
+        if (s && s.weights && s.measures) {
+          if (!bootDirty) {
+            store = normalizeStore(s);
+            dropLocal();          /* 旧位置的副本已经没用了 */
+            persist();
+          } else {
+            store = mergeStore(normalizeStore(s), store);
+            persist().then(function (ok) { if (ok) dropLocal(); });
+          }
+          return;
+        }
+        /* 新库还空着：整份写进去，写成功再删旧键，写失败留着旧键兜底 */
+        return persist().then(function (ok) { if (ok) dropLocal(); });
+      });
+    }).catch(function () {
+      /* 这台浏览器不给用 IndexedDB（比如某些本地文件环境），照旧走 localStorage */
+      useIDB = false;
+    }).then(function () {
+      idxCache = null;
+      renderAll();
+      switchPage('calendar');
+    });
   }
 
   /* ================= 状态 ================= */
@@ -715,9 +816,8 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   var overlayEl = document.getElementById('overlay');
   var sheetEl = document.getElementById('sheet');
   var sheetInner = document.getElementById('sheet-inner');
-  var bkListEl = document.getElementById('bk-list');
-  var bkCountEl = document.getElementById('bk-count');
   var bkRemindEl = document.getElementById('bk-remind');
+  var lastSavedEl = document.getElementById('last-saved');
   var bkDotEl = document.getElementById('bk-dot');
   var tabAddEl = document.getElementById('tab-add');
   var fileInputEl = document.getElementById('file-input');
@@ -978,13 +1078,20 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   /* 默认展示值：没有历史记录时滚轮的起始位置 */
   function defaultDisp() { return unitOf() === 'jin' ? 120 : 60; }
 
+  /* 找 dateKey 之前最近一条有值的记录；之前没有就取之后最早的一条 */
+  function nearestEntry(list, dateKey, valueOf) {
+    var before = null, after = null;
+    list.forEach(function (k) {
+      if (valueOf(k) === null) return;
+      if (k < dateKey) before = k;
+      else if (k > dateKey && !after) after = k;
+    });
+    var hit = before || after;
+    return hit ? { date: hit, value: valueOf(hit) } : null;
+  }
+
   function lastWeightEntry(dateKey) {
-    var keys = indexWeights().keys;
-    var i, best = null;
-    for (i = 0; i < keys.length; i++) { if (keys[i] < dateKey) best = keys[i]; }
-    if (best) return { date: best, kg: store.weights[best] };
-    for (i = 0; i < keys.length; i++) { if (keys[i] > dateKey) return { date: keys[i], kg: store.weights[keys[i]] }; }
-    return null;
+    return nearestEntry(indexWeights().keys, dateKey, function (k) { return store.weights[k]; });
   }
 
   function rowText(v) {
@@ -1144,7 +1251,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       val = startDisp;
     } else {
       var ref = lastWeightEntry(dateKey);
-      val = ref ? toDisp(ref.kg) : defaultDisp();
+      val = ref ? toDisp(ref.value) : defaultDisp();
     }
     openNumSheet({
       kind: 'weight',
@@ -1226,18 +1333,29 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     toast('已删除 ' + fmtYMD(key) + ' 的体重记录');
   }
 
+  /* 清空 / 重置共用：确认 → 清空 → 落盘 → 重绘 → 提示 */
+  function confirmClear(o) {
+    askConfirm({
+      title: o.title,
+      sub: o.sub,
+      ok: o.ok || '清空',
+      onOk: function () {
+        o.clear();
+        persist();
+        if (o.after) o.after();
+        renderAll();
+        toast(o.msg);
+      }
+    });
+  }
+
   /* 清空全部体重记录（体围、备份不受影响） */
   function openClearWeight() {
-    askConfirm({
+    confirmClear({
       title: '确认清空体重记录？',
-      ok: '清空',
-      onOk: function () {
-        store.weights = {};
-        persist();
-        focusToday();
-        renderAll();
-        toast('已清空体重记录');
-      }
+      clear: function () { store.weights = {}; },
+      after: focusToday,
+      msg: '已清空体重记录'
     });
   }
 
@@ -1285,16 +1403,10 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   }
 
   function lastMetricEntry(metricKey, dateKey) {
-    var dates = measureDates();
-    var i, best = null;
-    for (i = 0; i < dates.length; i++) {
-      if (dates[i] < dateKey && isNum(store.measures[dates[i]][metricKey])) best = dates[i];
-    }
-    if (best) return { date: best, value: +store.measures[best][metricKey] };
-    for (i = dates.length - 1; i >= 0; i--) {
-      if (isNum(store.measures[dates[i]][metricKey])) return { date: dates[i], value: +store.measures[dates[i]][metricKey] };
-    }
-    return null;
+    return nearestEntry(measureDates(), dateKey, function (k) {
+      var v = store.measures[k][metricKey];
+      return isNum(v) ? +v : null;
+    });
   }
 
   function saveMetricValue() {
@@ -1523,111 +1635,31 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 2400);
   }
 
-  /* 生成一份快照（深拷贝，先不入列表；存成文件成功后才入） */
-  function newBackup() {
-    if (!hasData()) return null;
-    return {
-      id: 'b' + Date.now() + Math.floor(Math.random() * 1000),
-      at: new Date().toISOString(),
-      weights: JSON.parse(JSON.stringify(store.weights)),
-      measures: JSON.parse(JSON.stringify(store.measures))
-    };
-  }
-
-  function commitBackup(rec) {
-    if (!rec) return;
-    store.backups.unshift(rec);
-    while (store.backups.length > BACKUP_LIMIT) store.backups.pop();
-  }
-
-  function timeLabel(iso) {
-    var d = new Date(iso);
-    return fmtMD(ymd(d)) + ' 周' + WEEK[d.getDay()] +
-      ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  }
-
+  /* 生成一份快照（深拷贝），只用来写成手机文件，不留在浏览器里 */
   var SAVE_GAP_DAYS = 15;
 
-  /* 距上次「备份到手机本地」过了多少天；从没存过返回 null */
-  function daysSinceSave() {
-    var t = store.settings.savedAt ? new Date(store.settings.savedAt) : null;
-    if (!t || isNaN(t.getTime())) return null;
-    return Math.floor((Date.now() - t.getTime()) / 86400000);
-  }
-
-  function renderRemind() {
-    var d = daysSinceSave();
+  function renderBackup() {
+    /* 距上次备份超过 15 天（或从没存过）就提醒，标题上带个红点 */
+    var s = store.settings.savedAt ? new Date(store.settings.savedAt) : null;
+    var valid = s && !isNaN(s.getTime());
+    var d = valid ? Math.floor((Date.now() - s.getTime()) / 86400000) : null;
     var need = hasData() && (d === null || d >= SAVE_GAP_DAYS);
-    if (need) {
-      bkRemindEl.textContent = d === null
-        ? '还没有备份到手机本地，建议现在存一份。'
-        : '已 ' + d + ' 天未备份到手机本地，建议现在存一份。';
-    }
+    bkRemindEl.textContent = d === null
+      ? '还没有备份到手机本地，建议现在存一份。'
+      : '已 ' + d + ' 天未备份到手机本地，建议现在存一份。';
     bkRemindEl.hidden = !need;
     bkDotEl.hidden = !need;
+
+    lastSavedEl.hidden = !valid;
+    if (valid) {
+      lastSavedEl.textContent = '上次备份到手机：' + fmtMD(ymd(s)) + ' ' + pad(s.getHours()) + ':' + pad(s.getMinutes());
+    }
   }
 
   function markSaved() {
     store.settings.savedAt = new Date().toISOString();
     persist();
-    renderRemind();
-  }
-
-  function renderBackup() {
-    renderRemind();
-    var list = store.backups.slice().sort(function (a, b) { return a.at < b.at ? 1 : -1; });
-    bkCountEl.textContent = list.length ? list.length + ' 份' : '';
-
-    if (!list.length) {
-      bkListEl.innerHTML = '';
-      return;
-    }
-    bkListEl.innerHTML = list.map(function (b) {
-      return '<div class="bitem">' +
-        '<div class="bitem-l">' +
-        '<div class="bitem-time">' + timeLabel(b.at) + '</div>' +
-        '<div class="bitem-meta">体重 ' + Object.keys(b.weights || {}).length +
-        ' 条 · 围度 ' + Object.keys(b.measures || {}).length + ' 组</div>' +
-        '</div>' +
-        '<div class="bitem-acts">' +
-        '<button data-restore="' + b.id + '">恢复</button>' +
-        '<button class="del" data-delbk="' + b.id + '">删除</button>' +
-        '</div></div>';
-    }).join('');
-  }
-
-  function restoreBackup(id) {
-    var b = null;
-    store.backups.forEach(function (x) { if (x.id === id) b = x; });
-    if (!b) return;
-    askConfirm({
-      title: '恢复这份备份？',
-      sub: timeLabel(b.at) + ' · 当前记录会先自动存一份备份',
-      ok: '恢复',
-      onOk: function () {
-        commitBackup(newBackup());
-        store.weights = JSON.parse(JSON.stringify(b.weights || {}));
-        store.measures = JSON.parse(JSON.stringify(b.measures || {}));
-        persist();
-        focusToday();
-        renderAll();
-        switchPage('calendar');
-        toast('已恢复到 ' + timeLabel(b.at) + ' 的备份');
-      }
-    });
-  }
-
-  function deleteBackup(id) {
-    askConfirm({
-      title: '删除这份备份？',
-      ok: '删除',
-      onOk: function () {
-        store.backups = store.backups.filter(function (x) { return x.id !== id; });
-        persist();
-        renderBackup();
-        toast('已删除备份');
-      }
-    });
+    renderBackup();
   }
 
   /* ---------- 确认弹层（统一样式） ---------- */
@@ -1651,36 +1683,24 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     closeSheet();
   }
 
-  /* ---------- 备份页：重置数据（保留备份记录） ---------- */
+  /* ---------- 备份页：重置数据 ---------- */
   function openResetSheet() {
-    askConfirm({
+    confirmClear({
       title: '确认重置？',
-      sub: '体重与体围记录会被清空，备份记录保留。',
+      sub: '体重与体围记录会被清空，且无法撤销；要保留请先备份到手机。',
       ok: '确认重置',
-      onOk: function () {
-        store.weights = {};
-        store.measures = {};
-        persist();
-        focusToday();
-        ui.metric = 'waist';
-        renderAll();
-        switchPage('calendar');
-        toast('已重置，备份记录保留');
-      }
+      clear: function () { store.weights = {}; store.measures = {}; },
+      after: function () { focusToday(); ui.metric = 'waist'; switchPage('calendar'); },
+      msg: '已重置'
     });
   }
 
   /* ---------- 体围页：清空体围记录 ---------- */
   function openClearMeasure() {
-    askConfirm({
+    confirmClear({
       title: '确认清空体围记录？',
-      ok: '清空',
-      onOk: function () {
-        store.measures = {};
-        persist();
-        renderMeasure();
-        toast('已清空体围记录');
-      }
+      clear: function () { store.measures = {}; },
+      msg: '已清空体围记录'
     });
   }
 
@@ -1723,14 +1743,16 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       .then(function (w) { return w.write(text).then(function () { return w.close(); }); });
   }
 
-  /* 把一份快照存成手机上的文件；存成功了才写入备份记录 */
-  function saveSnapshot(rec) {
-    if (!rec) return;
+  /* 备份：把当前记录整份写成手机文件，浏览器里不留副本 */
+  function backupToFile() {
+    if (!hasData()) { toast('还没有记录可以备份'); return; }
+    var rec = {
+      at: new Date().toISOString(),
+      weights: JSON.parse(JSON.stringify(store.weights)),
+      measures: JSON.parse(JSON.stringify(store.measures))
+    };
     var text = fileTextOf(rec), name = fileNameOf(rec.at);
     function done(msg) {
-      commitBackup(rec);
-      persist();
-      renderBackup();
       markSaved();
       toast(msg);
     }
@@ -1784,7 +1806,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
 
     pendingImport = { w: cleanW, m: cleanM, nw: nw, nm: nm };
     openSheet(
-      sheetHead('导入数据', '文件里有 ' + dataText(nw, nm)) +
+      sheetHead('导入数据', '文件里有 ' + dataText(nw, nm) + '；「整体覆盖」会替换当前全部记录，且不会自动留副本') +
       '<div class="imp-acts">' +
       '<button class="btn-primary" id="imp-merge">合并到现有记录</button>' +
       '<button class="btn-soft" id="imp-replace">整体覆盖</button>' +
@@ -1798,7 +1820,6 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     if (!pi) return;
     pendingImport = null;
     closeSheet();
-    commitBackup(newBackup());
     var addW = 0, addM = 0;
 
     if (mode === 'replace') {
@@ -1981,17 +2002,9 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     if (t.closest('#clear-all')) { openClearMeasure(); return; }
 
     /* 备份页 */
-    if (t.closest('#backup-now')) {
-      if (!hasData()) { toast('还没有记录可以备份'); return; }
-      saveSnapshot(newBackup());
-      return;
-    }
+    if (t.closest('#backup-now')) { backupToFile(); return; }
     if (t.closest('#reset-data')) { openResetSheet(); return; }
     if (t.closest('#import-file')) { fileInputEl.value = ''; fileInputEl.click(); return; }
-    var rbk = t.closest('[data-restore]');
-    if (rbk) { restoreBackup(rbk.getAttribute('data-restore')); return; }
-    var dbk = t.closest('[data-delbk]');
-    if (dbk) { deleteBackup(dbk.getAttribute('data-delbk')); return; }
 
     /* 弹层内部 */
     if (t.closest('#imp-merge')) { applyImport('merge'); return; }
@@ -2058,9 +2071,10 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   }, { passive: true });
 
   /* ================= 启动 ================= */
-  store = loadStore();
-  renderAll();
+  store = loadLocal();      /* 旧位置还有数据就先画一版，别等 */
+  if (hasData()) renderAll();
   switchPage('calendar');
+  bootStorage();            /* 读 IndexedDB（首次会把记录整体搬过去），完成后重画 */
 
 })();
 </script>
