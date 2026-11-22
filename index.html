@@ -225,20 +225,18 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.03em;margin:0;line-height:1.1
   padding:12px 18px calc(12px + env(safe-area-inset-bottom));
 }
 .tabbar-inner{
-  pointer-events:auto;width:100%;max-width:404px;display:grid;grid-template-columns:repeat(2,1fr) 46px repeat(2,1fr);gap:4px;
+  pointer-events:auto;width:100%;max-width:404px;display:grid;grid-template-columns:repeat(2,1fr) 48px repeat(2,1fr);gap:4px;
   background:rgba(251,250,247,.9);border-radius:22px;padding:6px;
   -webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 6px 26px rgba(20,19,22,.1),0 0 0 1px rgba(20,19,22,.05);
 }
 .tab-add{
   border:0;background:var(--ink);color:#fff;border-radius:50%;cursor:pointer;font-family:inherit;
-  display:grid;place-items:center;align-self:center;justify-self:center;width:42px;height:42px;
-  box-shadow:0 4px 14px rgba(20,19,22,.18);transition:background .18s ease,transform .12s ease;
+  display:grid;place-items:center;align-self:center;justify-self:center;width:48px;height:48px;
+  box-shadow:0 6px 18px rgba(20,19,22,.24);transition:background .18s ease,transform .12s ease;
 }
-.tab-add svg{width:18px;height:18px;stroke:currentColor;stroke-width:2.4;fill:none}
+.tab-add svg{width:22px;height:22px;stroke:currentColor;stroke-width:2.6;fill:none}
 .tab-add:active{background:#2E2B33;transform:scale(.94)}
-.tab-add[hidden]{display:none}
-.tabbar-inner.no-add{grid-template-columns:repeat(4,1fr)}
 .tab{
   border:0;background:none;font-family:inherit;cursor:pointer;color:var(--ink-3);font-size:11px;
   display:flex;flex-direction:column;align-items:center;gap:3px;padding:7px 0 6px;border-radius:16px;
@@ -474,7 +472,6 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
 <section id="page-backup" hidden>
   <div class="page-head">
     <h1>备份<span class="bk-dot" id="bk-dot" hidden></span></h1>
-    <span class="head-note">仅存本机</span>
   </div>
 
   <div class="bcard">
@@ -486,15 +483,15 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     </div>
     <div class="brow">
       <div class="brow-main">
-        <div class="blabel">重置数据</div>
+        <div class="blabel">导入备份</div>
       </div>
-      <button class="breset-btn" id="reset-data">重置</button>
+      <button class="bbtn" id="import-file">导入</button>
     </div>
     <div class="brow">
       <div class="brow-main">
-        <div class="blabel">导入文件</div>
+        <div class="blabel">重置数据</div>
       </div>
-      <button class="bbtn" id="import-file">导入</button>
+      <button class="breset-btn" id="reset-data">重置</button>
     </div>
   </div>
 
@@ -661,14 +658,23 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   function openDB() {
     return new Promise(function (res, rej) {
       if (!window.indexedDB) { rej(new Error('no-idb')); return; }
-      var req = indexedDB.open(DB_NAME, 1);
+      var done = false, req;
+      function fail(e) { if (!done) { done = true; rej(e || new Error('idb-open')); } }
+      /* 有些环境打开会一直挂着（不回调），超时就退回 localStorage，别让界面等在这儿 */
+      var timer = setTimeout(function () { fail(new Error('idb-timeout')); }, 1500);
+      try { req = indexedDB.open(DB_NAME, 1); } catch (e) { clearTimeout(timer); fail(e); return; }
       req.onupgradeneeded = function () {
         var d = req.result;
         if (!d.objectStoreNames.contains(DB_STORE)) d.createObjectStore(DB_STORE);
       };
-      req.onsuccess = function () { res(req.result); };
-      req.onerror = function () { rej(req.error || new Error('idb-open')); };
-      req.onblocked = function () { rej(new Error('idb-blocked')); };
+      req.onsuccess = function () {
+        clearTimeout(timer);
+        if (done) { try { req.result.close(); } catch (e) {} return; }
+        done = true;
+        res(req.result);
+      };
+      req.onerror = function () { clearTimeout(timer); fail(req.error); };
+      req.onblocked = function () { clearTimeout(timer); fail(new Error('idb-blocked')); };
     });
   }
 
@@ -774,8 +780,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       useIDB = false;
     }).then(function () {
       idxCache = null;
-      renderAll();
-      switchPage('calendar');
+      renderAll();   /* 只重画，别把用户正在看的页面拽回日历 */
     });
   }
 
@@ -819,7 +824,6 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   var bkRemindEl = document.getElementById('bk-remind');
   var lastSavedEl = document.getElementById('last-saved');
   var bkDotEl = document.getElementById('bk-dot');
-  var tabAddEl = document.getElementById('tab-add');
   var fileInputEl = document.getElementById('file-input');
   var helpTipEl = document.getElementById('help-tip');
   var toastEl = document.getElementById('toast');
@@ -886,7 +890,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       ? '<span>' + fmtW(lw.kg) + '</span><span class="head-u">' + unitLabel() + '</span>'
       : '<span class="head-u" style="font-size:13px">还没有记录</span>';
     var h = heightCm();
-    if (headBmiEl) headBmiEl.textContent = (lw && h) ? bmiOf(lw.kg, h).toFixed(1) : '—';
+    headBmiEl.textContent = (lw && h) ? bmiOf(lw.kg, h).toFixed(1) : '—';
 
     /* 目标体重：距目标还差多少 */
     var goal = +store.settings.goal;
@@ -1050,6 +1054,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
 
   function openSheet(html) {
     sheetInner.innerHTML = html;
+    sheetInner.scrollTop = 0;   /* 长表单重开时别停在上次滚到的位置 */
     overlayEl.classList.add('on');
     sheetEl.classList.add('on');
     document.body.style.overflow = 'hidden';
@@ -1306,7 +1311,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
         if (cur) html += '</div>';
         var m = mstat[ym];
         var base = m.base !== null ? m.base : (m.n > 1 ? m.first : null);
-        var chg = base === null ? null : m.last - base;
+        var chg = base === null ? null : r2(m.last - base);
         html += '<div class="wgroup"><div class="wgroup-head">' +
           '<span class="t">' + d.getFullYear() + '年' + (d.getMonth() + 1) + '月</span>' +
           '<span class="n">' + m.n + ' 天' +
@@ -1349,14 +1354,22 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     });
   }
 
-  /* 清空全部体重记录（体围、备份不受影响） */
-  function openClearWeight() {
-    confirmClear({
-      title: '确认清空体重记录？',
-      clear: function () { store.weights = {}; },
-      after: focusToday,
-      msg: '已清空体重记录'
-    });
+  /* 清空一类记录：体重页、体围页各自调 */
+  function openClear(kind) {
+    if (kind === 'weight') {
+      confirmClear({
+        title: '确认清空体重记录？',
+        clear: function () { store.weights = {}; },
+        after: focusToday,
+        msg: '已清空体重记录'
+      });
+    } else {
+      confirmClear({
+        title: '确认清空体围记录？',
+        clear: function () { store.measures = {}; },
+        msg: '已清空体围记录'
+      });
+    }
   }
 
   /* 删除单日体重：体重页的「删除」和日历长按都走这里 */
@@ -1484,12 +1497,9 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
       setHint('体重请输入 ' + lim.lo + '–' + lim.hi + ' ' + unitLabel(), true); return;
     }
     store.settings.height = r1(hv);
-    if (wv !== null) {
-      var kg = r2(fromDisp(wv));
-      /* 只有今天确实称过（已有记录），或这次改了体重，才落到今天的记录上 */
-      var hasToday = store.weights[TODAY_KEY] !== undefined;
-      var changed = bmiPrefill === null || Math.abs(wv - bmiPrefill) > 0.049;
-      if (hasToday || changed) store.weights[TODAY_KEY] = kg;
+    /* 体重没改就别回写，免得把已有的两位小数按显示精度重存一遍 */
+    if (wv !== null && (bmiPrefill === null || Math.abs(wv - bmiPrefill) > 0.049)) {
+      store.weights[TODAY_KEY] = r2(fromDisp(wv));
     }
     persist();
     focusToday();
@@ -1695,15 +1705,6 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     });
   }
 
-  /* ---------- 体围页：清空体围记录 ---------- */
-  function openClearMeasure() {
-    confirmClear({
-      title: '确认清空体围记录？',
-      clear: function () { store.measures = {}; },
-      msg: '已清空体围记录'
-    });
-  }
-
   /* ---------- 备份文件 ---------- */
 
   /* 每份备份一个文件，文件名带时间（到毫秒，避免同秒互相覆盖） */
@@ -1755,6 +1756,13 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     function done(msg) {
       markSaved();
       toast(msg);
+    }
+    if (window.AndroidSave && window.AndroidSave.save) {
+      try {
+        if (window.AndroidSave.save(text, name)) done('已存到手机「下载/体重日历」');
+        else toast('备份保存失败，请重试');
+      } catch (e) { toast('备份保存失败，请重试'); }
+      return;
     }
     function fallback() {
       flashDownload(text, name);
@@ -1868,16 +1876,14 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   var curPage = 'calendar';
 
   function switchPage(p) {
+    var changed = p !== curPage;
     curPage = p;
     [[pageW, 'weight'], [pageCal, 'calendar'], [pageMea, 'measure'], [pageBk, 'backup']]
       .forEach(function (x) { x[0].hidden = p !== x[1]; });
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('on', t.getAttribute('data-tab') === p);
     });
-    /* 备份页没有可记录的数据，「+」收起，四个页签重新均分 */
-    var noAdd = p === 'backup';
-    tabAddEl.hidden = noAdd;
-    tabAddEl.parentNode.classList.toggle('no-add', noAdd);
+    if (changed) window.scrollTo(0, 0);   /* 换页从顶部开始看 */
   }
 
   /* 日历视图重绘：换月、回今天都走这里 */
@@ -1999,7 +2005,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     var edit = t.closest('[data-edit]');
     if (edit) { openMeasureSheet(edit.getAttribute('data-edit')); return; }
 
-    if (t.closest('#clear-all')) { openClearMeasure(); return; }
+    if (t.closest('#clear-all')) { openClear('measure'); return; }
 
     /* 备份页 */
     if (t.closest('#backup-now')) { backupToFile(); return; }
@@ -2017,7 +2023,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
     if (t.closest('#w-more')) { wOpen = !wOpen; renderWeight(); return; }
     var wdel = t.closest('[data-wdelkey]');
     if (wdel) { deleteWeightAt(wdel.getAttribute('data-wdelkey')); return; }
-    if (t.closest('#clear-weight')) { openClearWeight(); return; }
+    if (t.closest('#clear-weight')) { openClear('weight'); return; }
     var wedit = t.closest('[data-wedit]');
     if (wedit) { openWeightSheet(wedit.getAttribute('data-wedit')); return; }
 
@@ -2071,10 +2077,12 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:.45}
   }, { passive: true });
 
   /* ================= 启动 ================= */
-  store = loadLocal();      /* 旧位置还有数据就先画一版，别等 */
-  if (hasData()) renderAll();
+  store = loadLocal();      /* 本地读是同步的，有数据就先画，别等 IndexedDB */
+  renderAll();
   switchPage('calendar');
   bootStorage();            /* 读 IndexedDB（首次会把记录整体搬过去），完成后重画 */
+
+  window.__androidImport = importText;   /* 安卓壳选中文件后直接塞进来 */
 
 })();
 </script>
